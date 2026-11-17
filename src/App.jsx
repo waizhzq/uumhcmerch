@@ -37,11 +37,12 @@ export default function App() {
   const [open, setOpen] = useState(false);
   const [sheet, setSheet] = useState(false);
   const [side, setSide] = useState("front");
-  const [shown, setShown] = useState({ idx: START, side: "front" }); // what the big figure shows
-  const [flip, setFlip] = useState(false);
+  const [dir, setDir] = useState(0); // direction of the last step, for the slide-in
+  const [dragX, setDragX] = useState(0);
   const [swing, setSwing] = useState(null);
   const [loading, setLoading] = useState(true);
-  const touch = useRef(null);
+  const drag = useRef(null);      // active swipe gesture
+  const dragged = useRef(false);  // swallow the click that follows a swipe
   const sheetTouch = useRef(null);
 
   const p = PRODUCTS[idx];
@@ -63,24 +64,43 @@ export default function App() {
     PRODUCTS.forEach((q) => { new Image().src = q.front; new Image().src = q.back; });
   }, []);
 
-  // flip animation when the figure changes while open
-  useEffect(() => {
-    if (shown.idx === idx && shown.side === side) return;
-    if (!open) { setShown({ idx, side }); return; }
-    setFlip(true);
-    const t = setTimeout(() => { setShown({ idx, side }); setFlip(false); }, 160);
-    return () => clearTimeout(t);
-  }, [idx, side, open, shown]);
-
   const openDetail = useCallback((i) => {
-    setIdx(i); setSide("front"); setShown({ idx: i, side: "front" }); setOpen(true);
+    setIdx(i); setSide("front"); setDir(0); setOpen(true);
     track("view_item", { item_id: PRODUCTS[i].id, item_name: PRODUCTS[i].name });
   }, []);
   const closeDetail = () => setOpen(false);
   const step = useCallback((d) => {
     setIdx((i) => wrap(i + d));
     setSide("front");
+    setDir(d);
   }, []);
+
+  // swipe: follows the finger horizontally, lets vertical scrolling through
+  const onPointerDown = (e) => {
+    if (e.pointerType === "mouse" || sheet) return;
+    drag.current = { x: e.clientX, y: e.clientY, id: e.pointerId, axis: null, dx: 0 };
+  };
+  const onPointerMove = (e) => {
+    const g = drag.current;
+    if (!g || g.id !== e.pointerId) return;
+    const dx = e.clientX - g.x, dy = e.clientY - g.y;
+    if (!g.axis && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+      g.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+      if (g.axis === "x") { try { e.currentTarget.setPointerCapture(e.pointerId); } catch {} }
+    }
+    if (g.axis === "x") { g.dx = dx; setDragX(dx); }
+  };
+  const endDrag = (e) => {
+    const g = drag.current;
+    if (!g || g.id !== e.pointerId) return;
+    drag.current = null;
+    if (g.axis === "x") {
+      dragged.current = true;
+      setTimeout(() => { dragged.current = false; }, 50);
+      if (Math.abs(g.dx) > 45) step(g.dx < 0 ? 1 : -1);
+    }
+    setDragX(0);
+  };
   const openSheet = () => {
     setSheet(true);
     track("view_sizes", { item_id: p.id });
@@ -99,6 +119,7 @@ export default function App() {
   }, [sheet, step]);
 
   const onSlotClick = (i) => {
+    if (dragged.current) return;
     if (i === idx || hoverable) openDetail(i);
     else setIdx(i);
   };
@@ -106,11 +127,11 @@ export default function App() {
   const onTag = (k) => {
     setSwing(k);
     setTimeout(() => setSwing(null), 700);
-    if (k !== idx) { setIdx(k); setSide("front"); }
+    if (k !== idx) { setDir(k > idx ? 1 : -1); setIdx(k); setSide("front"); }
   };
 
-  const figP = PRODUCTS[shown.idx];
-  const tags = PRODUCTS.map((q, k) => [q, k]).filter(([q]) => q.group === PRODUCTS[shown.idx].group);
+  const tags = PRODUCTS.map((q, k) => [q, k]).filter(([q]) => q.group === p.group);
+  const dragging = dragX !== 0;
 
   return (
     <>
@@ -125,18 +146,16 @@ export default function App() {
 
       <main
         id="stage"
-        onTouchStart={(e) => { touch.current = [e.touches[0].clientX, e.touches[0].clientY]; }}
-        onTouchEnd={(e) => {
-          if (!touch.current) return;
-          const dx = e.changedTouches[0].clientX - touch.current[0];
-          const dy = e.changedTouches[0].clientY - touch.current[1];
-          touch.current = null;
-          if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) step(dx < 0 ? 1 : -1);
-        }}
+        className={dragging ? "dragging" : ""}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
       >
         <div className="rack-wrap">
           <div className="bar" />
-          <div className="items" role="listbox" aria-label="Products">
+          <div className="items" role="listbox" aria-label="Products"
+               style={{ transform: `translateX(${open ? 0 : dragX * 0.5}px)` }}>
             {PRODUCTS.map((q, i) => (
               <button
                 key={q.id}
@@ -165,8 +184,14 @@ export default function App() {
           <button className="nav prev" aria-label="Previous" onClick={() => step(-1)}>‹</button>
           <button className="nav next" aria-label="Next" onClick={() => step(1)}>›</button>
           <div className="d-row">
-            <div className={"fig" + (flip ? " flip" : "")}>
-              <img src={figP[shown.side]} alt={`${figP.name} — ${shown.side}`} draggable="false" />
+            <div className="fig-wrap" style={{ transform: `translateX(${dragX}px) rotate(${dragX / 40}deg)`, opacity: 1 - Math.min(Math.abs(dragX) / 400, 0.5) }}>
+              <div key={idx} className={"fig" + (dir > 0 ? " in-r" : dir < 0 ? " in-l" : "")}
+                   onClick={() => { if (!dragged.current) setSide(side === "front" ? "back" : "front"); }}>
+                <div className={"card" + (side === "back" ? " is-back" : "")}>
+                  <img className="face front" src={p.front} alt={`${p.name} — front`} draggable="false" />
+                  <img className="face back" src={p.back} alt={`${p.name} — back`} draggable="false" />
+                </div>
+              </div>
             </div>
             <div className="tags">
               {tags.map(([q, k]) => (
